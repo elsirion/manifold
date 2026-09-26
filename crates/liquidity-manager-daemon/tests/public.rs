@@ -577,6 +577,106 @@ async fn request_liquidity_uses_available_wallet_funds() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The requester accepts any amount within its bounds, so FLIP commits as much
+/// of the range as capacity allows rather than the bare minimum.
+#[tokio::test]
+async fn gateway_allocation_funds_up_to_the_requested_maximum() -> anyhow::Result<()> {
+    let context = test_context("fund-to-max-available").await?;
+    let provider_pubkey = setup_ready_provider(
+        &context,
+        CapacityMode::AvailableFunds,
+        None,
+        vec![SourceType::Gateway],
+    )
+    .await?;
+    let response = context
+        .request_liquidity(signed_request(test_request(
+            &provider_pubkey,
+            "fund-to-max",
+            gateway_range(5_000, Some(50_000)),
+        )?)?)
+        .await?;
+    assert_eq!(accepted_gateway_amount(&response), Sats(50_000));
+
+    let response = context
+        .request_liquidity(signed_request(test_request(
+            &provider_pubkey,
+            "fund-without-max",
+            gateway_range(5_000, None),
+        )?)?)
+        .await?;
+    assert_eq!(accepted_gateway_amount(&response), Sats(5_000));
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_allocation_is_limited_by_the_remaining_cap() -> anyhow::Result<()> {
+    let context = test_context("fund-to-max-cap").await?;
+    let provider_pubkey = setup_ready_provider(
+        &context,
+        CapacityMode::ExplicitCap,
+        Some(Sats(30_000)),
+        vec![SourceType::Gateway],
+    )
+    .await?;
+    let response = context
+        .request_liquidity(signed_request(test_request(
+            &provider_pubkey,
+            "cap-first",
+            gateway_range(5_000, Some(20_000)),
+        )?)?)
+        .await?;
+    assert_eq!(accepted_gateway_amount(&response), Sats(20_000));
+
+    // Only 10 000 of the cap is left, which still covers the minimum.
+    let response = context
+        .request_liquidity(signed_request(test_request(
+            &provider_pubkey,
+            "cap-second",
+            gateway_range(5_000, Some(20_000)),
+        )?)?)
+        .await?;
+    assert_eq!(accepted_gateway_amount(&response), Sats(10_000));
+
+    // Nothing is left, so even the minimum is refused.
+    assert_rejection(
+        context
+            .request_liquidity(signed_request(test_request(
+                &provider_pubkey,
+                "cap-third",
+                gateway_range(5_000, Some(20_000)),
+            )?)?)
+            .await?,
+        PublicRejectionCode::InsufficientCapacity,
+    );
+    Ok(())
+}
+
+#[test]
+fn gateway_allocation_amount_keeps_the_fee_reserve_out_of_the_amount() {
+    let fee = Sats(1_000);
+    // Plenty of capacity: the maximum.
+    assert_eq!(
+        gateway_allocation_amount(Sats(100), Some(Sats(500)), fee, Sats(10_000)),
+        Sats(500)
+    );
+    // Capacity between min and max: all of it except the fee reserve.
+    assert_eq!(
+        gateway_allocation_amount(Sats(100), Some(Sats(5_000)), fee, Sats(3_000)),
+        Sats(2_000)
+    );
+    // Too little for the minimum: the minimum, which the capacity check refuses.
+    assert_eq!(
+        gateway_allocation_amount(Sats(100), Some(Sats(5_000)), fee, Sats(500)),
+        Sats(100)
+    );
+    // No maximum: exactly the minimum.
+    assert_eq!(
+        gateway_allocation_amount(Sats(100), None, fee, Sats(10_000)),
+        Sats(100)
+    );
+}
+
 #[tokio::test]
 async fn request_liquidity_is_idempotent_and_detects_conflict() -> anyhow::Result<()> {
     let context = test_context("phase3-idempotency").await?;
@@ -1604,6 +1704,29 @@ fn gateway_amounts(amount: u64) -> LiquidityAmountBounds {
         gateway_max_amount: None,
         stability_min_amount: Sats(0),
         stability_max_amount: None,
+    }
+}
+
+fn gateway_range(min: u64, max: Option<u64>) -> LiquidityAmountBounds {
+    LiquidityAmountBounds {
+        gateway_min_amount: Sats(min),
+        gateway_max_amount: max.map(Sats),
+        stability_min_amount: Sats(0),
+        stability_max_amount: None,
+    }
+}
+
+fn accepted_gateway_amount(response: &Signed<RequestLiquidityResponse>) -> Sats {
+    match &response.payload.outcome {
+        RequestLiquidityOutcome::Accepted(status) => status
+            .item_statuses
+            .iter()
+            .find_map(|item| match &item.target {
+                AllocationItemTarget::Gateway { amount, .. } => Some(*amount),
+                _ => None,
+            })
+            .expect("accepted response carries a gateway item"),
+        outcome => panic!("expected accepted response, got {outcome:?}"),
     }
 }
 

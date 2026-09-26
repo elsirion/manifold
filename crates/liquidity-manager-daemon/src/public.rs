@@ -631,45 +631,6 @@ async fn plan_allocation(
     config: &SetupConfigView,
     request: &RequestLiquidityRequest,
 ) -> ServiceResult<Option<AcceptedPlan>> {
-    let mut items = Vec::new();
-    if request.amounts.gateway_min_amount.0 > 0 {
-        let amount = request.amounts.gateway_min_amount;
-        let reserved_amount = checked_sats_add(amount, config.funding_policy.fee_reserve)?;
-        let item_id = allocation_store::item_id(
-            &request.federation_details.federation_id,
-            SourceType::Gateway,
-        );
-        items.push(PlannedItem {
-            item_id: item_id.clone(),
-            source_type: SourceType::Gateway,
-            target: AllocationItemTarget::Gateway {
-                item_id,
-                gateway_id: config.gateway.gateway_id.clone(),
-                gateway_name: config.gateway.gateway_name.clone(),
-                amount,
-            },
-            amount,
-            reserved_amount,
-        });
-    }
-    if request.amounts.stability_min_amount.0 > 0 {
-        let amount = request.amounts.stability_min_amount;
-        let reserved_amount = checked_sats_add(amount, config.funding_policy.fee_reserve)?;
-        let item_id = allocation_store::item_id(
-            &request.federation_details.federation_id,
-            SourceType::StabilityPool,
-        );
-        items.push(PlannedItem {
-            item_id: item_id.clone(),
-            source_type: SourceType::StabilityPool,
-            target: AllocationItemTarget::StabilityPool { item_id, amount },
-            amount,
-            reserved_amount,
-        });
-    }
-
-    let committed_amount = checked_sum(items.iter().map(|item| item.amount))?;
-    let reserved_amount = checked_sum(items.iter().map(|item| item.reserved_amount))?;
     let Some(balance) = wallet::latest_wallet_balance_observation_tx(tx).await? else {
         return Ok(None);
     };
@@ -689,6 +650,58 @@ async fn plan_allocation(
             explicit_remaining.min(available_wallet_balance.0)
         }
     };
+
+    let fee_reserve = config.funding_policy.fee_reserve;
+    let mut items = Vec::new();
+    // The stability item is planned first because it is always committed at
+    // its minimum; the gateway item then takes what capacity is left.
+    if request.amounts.stability_min_amount.0 > 0 {
+        let amount = request.amounts.stability_min_amount;
+        let reserved_amount = checked_sats_add(amount, fee_reserve)?;
+        let item_id = allocation_store::item_id(
+            &request.federation_details.federation_id,
+            SourceType::StabilityPool,
+        );
+        items.push(PlannedItem {
+            item_id: item_id.clone(),
+            source_type: SourceType::StabilityPool,
+            target: AllocationItemTarget::StabilityPool { item_id, amount },
+            amount,
+            reserved_amount,
+        });
+    }
+    if request.amounts.gateway_min_amount.0 > 0 {
+        let stability_reserved = checked_sum(items.iter().map(|item| item.reserved_amount))?;
+        let amount = gateway_allocation_amount(
+            request.amounts.gateway_min_amount,
+            request.amounts.gateway_max_amount,
+            fee_reserve,
+            Sats(capacity_basis.saturating_sub(stability_reserved.0)),
+        );
+        let reserved_amount = checked_sats_add(amount, fee_reserve)?;
+        let item_id = allocation_store::item_id(
+            &request.federation_details.federation_id,
+            SourceType::Gateway,
+        );
+        items.insert(
+            0,
+            PlannedItem {
+                item_id: item_id.clone(),
+                source_type: SourceType::Gateway,
+                target: AllocationItemTarget::Gateway {
+                    item_id,
+                    gateway_id: config.gateway.gateway_id.clone(),
+                    gateway_name: config.gateway.gateway_name.clone(),
+                    amount,
+                },
+                amount,
+                reserved_amount,
+            },
+        );
+    }
+
+    let committed_amount = checked_sum(items.iter().map(|item| item.amount))?;
+    let reserved_amount = checked_sum(items.iter().map(|item| item.reserved_amount))?;
     if reserved_amount.0 > capacity_basis {
         return Ok(None);
     }
@@ -716,6 +729,23 @@ async fn plan_allocation(
         items,
         initial_status,
     }))
+}
+
+/// The gateway amount to commit: as much of the requester's range as capacity
+/// allows. The requester accepts any amount within its bounds, so funding its
+/// maximum rather than its minimum gives the federation the most Lightning
+/// liquidity this provider can spare. Without a maximum the requester asked for
+/// exactly its minimum. When capacity cannot cover even the minimum, the
+/// minimum is returned and the caller's capacity check refuses the request.
+fn gateway_allocation_amount(
+    min: Sats,
+    max: Option<Sats>,
+    fee_reserve: Sats,
+    capacity: Sats,
+) -> Sats {
+    let ceiling = max.unwrap_or(min).0.max(min.0);
+    let affordable = capacity.0.saturating_sub(fee_reserve.0);
+    Sats(ceiling.min(affordable).max(min.0))
 }
 
 fn provider_info_parts(
