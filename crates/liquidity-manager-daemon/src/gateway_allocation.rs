@@ -360,14 +360,26 @@ async fn complete_if_gateway_funded(
     // output index it verified there; a manual review resolved by an operator
     // leaves `tx_vout` unset, and the asserted txid is then the whole of the
     // attribution that exists.
-    let claimed = claims.iter().any(|claim| {
-        claim.txid == funding_txid
-            && operation.tx_vout.is_none_or(|vout| claim.out_idx == vout)
-            && claim.amount.0 >= item.committed_amount.0
-    });
-    if !claimed {
+    //
+    // The claimed amount is not compared with the committed amount: the
+    // gateway reports what it was credited, which is the deposit net of the
+    // federation's wallet receive fee (walletv2 charges one), so a correctly
+    // funded item always reads slightly short. The outpoint already names the
+    // funding output FLIP itself sent, which is the whole of the attribution.
+    let Some(claim) = claims.iter().find(|claim| {
+        claim.txid == funding_txid && operation.tx_vout.is_none_or(|vout| claim.out_idx == vout)
+    }) else {
         recheck_gateway_deposit(setup, gateway, &item).await?;
         return Ok(false);
+    };
+    if claim.amount.0 < item.committed_amount.0 {
+        tracing::info!(
+            federation_id = %item.target.federation_id.0,
+            item_id = %item.item_id.0,
+            committed = item.committed_amount.0,
+            credited = claim.amount.0,
+            "gateway was credited less than committed, net of the federation's deposit fee"
+        );
     }
     // Completion evidence records what the gateway reported for the funded
     // federation, so a gateway that reports no such federation has nothing to

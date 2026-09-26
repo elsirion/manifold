@@ -382,6 +382,64 @@ async fn completed_wallet_operation_persists_gateway_completion_evidence() -> an
     Ok(())
 }
 
+/// walletv2 charges a receive fee, so the gateway is credited the deposit net
+/// of it and a correctly funded item reads short of its committed amount. The
+/// claim names the item's own funding outpoint, which is the attribution; the
+/// item completes at its committed amount.
+#[tokio::test]
+async fn a_claim_net_of_the_deposit_fee_completes_the_gateway_item() -> anyhow::Result<()> {
+    let database = Database::connect(test_sqlite_path("gateway-net-claim")).await?;
+    let setup = test_setup_config();
+    let (federation_id, item_id) = seed_gateway_allocation(&database, &setup, Sats(25_000)).await?;
+    let wallet = TestFundsWallet::new(setup.network, Sats(100_000), regtest_address());
+    let gateway = FakeGateway::new(setup.network, regtest_address());
+
+    process_gateway_allocations_with(
+        &database,
+        &setup,
+        &wallet,
+        &gateway,
+        crate::endpoint_policy::EndpointPolicy::AllowPrivate,
+    )
+    .await?;
+    let operation =
+        wallet_operation_for_item(&database, WalletOperationType::GatewayFunding, &item_id)
+            .await?
+            .expect("wallet operation exists");
+    apply_sync_update(
+        &database,
+        &WalletOperationSync {
+            operation_id: operation.operation_id.clone(),
+            status: SyncedWalletStatus::Completed,
+            txid: Some("txid-1".to_owned()),
+            confirmation_count: Some(1),
+            amount: None,
+            detail: None,
+        },
+    )
+    .await?;
+    gateway.claim_deposit("txid-1", 0, Sats(24_560)).await;
+    gateway.set_balance("federation-1", Sats(24_560)).await;
+
+    process_gateway_allocations_with(
+        &database,
+        &setup,
+        &wallet,
+        &gateway,
+        crate::endpoint_policy::EndpointPolicy::AllowPrivate,
+    )
+    .await?;
+    let status = load_allocation_status_by_federation(&database, &federation_id)
+        .await?
+        .expect("allocation status exists");
+    assert_eq!(
+        status.item_statuses[0].status,
+        ItemAllocationStatus::Completed
+    );
+    assert_eq!(status.item_statuses[0].fulfilled_amount, Some(Sats(25_000)));
+    Ok(())
+}
+
 /// A federation balance this item did not cause — e-cash held before the
 /// gateway connected, or a concurrent deposit the gateway claimed — must not
 /// complete it. Only a `deposit-confirmed` claim naming this item's own
