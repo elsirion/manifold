@@ -639,15 +639,18 @@ async fn plan_allocation(
     }
     let available_wallet_balance =
         funds_admin::available_balance_for_request(tx, config, balance.spendable).await?;
-    let capacity_basis = match config.capacity.mode {
-        CapacityMode::AvailableFunds => available_wallet_balance.0,
+    let capacity_basis = available_wallet_balance.0;
+    // The explicit cap bounds what one allocation commits, not the total of
+    // those running: a finished allocation releases its reservation, so a
+    // total would never bound spending over time anyway, while it did refuse a
+    // second federation for as long as the first was being funded.
+    let allocation_cap = match config.capacity.mode {
+        CapacityMode::AvailableFunds => None,
         CapacityMode::ExplicitCap => {
             let Some(explicit_cap) = config.capacity.explicit_cap else {
                 return Ok(None);
             };
-            let active_reserved_amount = wallet::active_reserved_amount_tx(tx).await?;
-            let explicit_remaining = explicit_cap.0.saturating_sub(active_reserved_amount.0);
-            explicit_remaining.min(available_wallet_balance.0)
+            Some(explicit_cap)
         }
     };
 
@@ -672,9 +675,21 @@ async fn plan_allocation(
     }
     if request.amounts.gateway_min_amount.0 > 0 {
         let stability_reserved = checked_sum(items.iter().map(|item| item.reserved_amount))?;
+        let stability_amount = checked_sum(items.iter().map(|item| item.amount))?;
+        let gateway_max = match allocation_cap {
+            None => request.amounts.gateway_max_amount,
+            Some(cap) => Some(Sats(
+                request
+                    .amounts
+                    .gateway_max_amount
+                    .unwrap_or(request.amounts.gateway_min_amount)
+                    .0
+                    .min(cap.0.saturating_sub(stability_amount.0)),
+            )),
+        };
         let amount = gateway_allocation_amount(
             request.amounts.gateway_min_amount,
-            request.amounts.gateway_max_amount,
+            gateway_max,
             fee_reserve,
             Sats(capacity_basis.saturating_sub(stability_reserved.0)),
         );
@@ -702,7 +717,9 @@ async fn plan_allocation(
 
     let committed_amount = checked_sum(items.iter().map(|item| item.amount))?;
     let reserved_amount = checked_sum(items.iter().map(|item| item.reserved_amount))?;
-    if reserved_amount.0 > capacity_basis {
+    if reserved_amount.0 > capacity_basis
+        || allocation_cap.is_some_and(|cap| committed_amount.0 > cap.0)
+    {
         return Ok(None);
     }
 

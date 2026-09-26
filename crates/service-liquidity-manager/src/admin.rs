@@ -454,7 +454,8 @@ pub struct CapacityConfig {
     /// Capacity configuration mode.
     pub mode: CapacityMode,
 
-    /// Explicit cap when mode is `ExplicitCap`.
+    /// Explicit cap when mode is `ExplicitCap`: the most one allocation commits,
+    /// fee reserve excluded. It does not bound the total of running allocations.
     pub explicit_cap: Option<Sats>,
 
     /// Supported source types.

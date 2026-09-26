@@ -1198,20 +1198,17 @@ async fn validate_config_view_with_reach(
 /// Reports the configuration being applied against the liabilities already
 /// outstanding under it.
 ///
-/// A configuration update can lower the allocation cap or raise the fee reserve
-/// below or above what active allocations and sends already commit, and until
-/// this check it did so without comparing the two at all — the operator saw a
-/// clean validation summary for a configuration their own deployment already
-/// exceeded.
+/// A configuration update can raise the fee reserve above what the wallet holds
+/// beyond active allocations and sends, and until this check it did so without
+/// comparing the two at all — the operator saw a clean validation summary for a
+/// configuration their own deployment already exceeded.
 ///
-/// It reports rather than refuses, and that is deliberate. Lowering the cap
-/// below outstanding reservations is how an operator winds a provider down, and
-/// refusing it would remove the only way to stop taking new work without
-/// stopping the daemon. Nor is it unsafe: `plan_allocation` subtracts active
-/// reservations from the cap with a saturating subtraction and takes the
-/// minimum with the wallet-backed figure, so a cap beneath outstanding
-/// reservations admits nothing rather than admitting too much. What was missing
-/// was the operator being told.
+/// It reports rather than refuses, and that is deliberate: raising the reserve
+/// is one way an operator winds a provider down. Nor is it unsafe:
+/// `plan_allocation` takes capacity from the same wallet-backed figure, so an
+/// exceeded configuration admits nothing rather than admitting too much. The
+/// explicit cap bounds each allocation on its own, so outstanding reservations
+/// are not compared with it.
 async fn active_liability_check(
     database: &Database,
     config: &SetupConfigView,
@@ -1225,14 +1222,6 @@ async fn active_liability_check(
         .map(|balance| balance.spendable);
 
     let mut exceeded = Vec::new();
-    if let Some(cap) = config.capacity.explicit_cap
-        && reserved.0 > cap.0
-    {
-        exceeded.push(format!(
-            "active allocation reservations {} exceed the configured cap {}",
-            reserved.0, cap.0
-        ));
-    }
     let committed = reserved
         .0
         .saturating_add(outgoing.0)

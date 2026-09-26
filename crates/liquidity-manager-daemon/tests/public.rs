@@ -500,59 +500,42 @@ async fn request_liquidity_rejects_when_capacity_is_unavailable() -> anyhow::Res
     Ok(())
 }
 
-/// An operator can lower the allocation cap below what is already reserved,
-/// or raise the fee reserve above what the wallet holds. Both are ordinary
-/// wind-down actions and neither is refused.
-///
-/// What must hold is that admission stays *closed* under them rather than
-/// merely inconsistent: the cap is reduced by active reservations with a
-/// saturating subtraction and then taken as a minimum against the
-/// wallet-backed figure, so a configuration its own deployment already
-/// exceeds admits nothing. Without that, a lowered cap would be a state in
-/// which the recorded budget is violated *and* new work is still accepted
-/// against it.
+/// The explicit cap bounds each allocation on its own. A running allocation
+/// does not use it up, so a second federation is funded while the first is,
+/// and only a request whose minimum exceeds the cap is refused.
 #[tokio::test]
-async fn a_configuration_already_exceeded_admits_nothing() -> anyhow::Result<()> {
-    let context = test_context("phase3-config-lowering").await?;
+async fn the_explicit_cap_bounds_each_allocation_not_their_total() -> anyhow::Result<()> {
+    let context = test_context("cap-per-allocation").await?;
     let provider_pubkey = setup_ready_provider(
         &context,
         CapacityMode::ExplicitCap,
-        Some(Sats(20_000)),
+        Some(Sats(10_000)),
         vec![SourceType::Gateway],
     )
     .await?;
 
-    // One accepted allocation reserving real capacity.
-    context
-        .request_liquidity(signed_request(test_request(
-            &provider_pubkey,
-            "lowering-first",
-            gateway_amounts(9_000),
-        )?)?)
-        .await?;
-
-    // The operator lowers the cap beneath what that allocation reserves.
-    setup_ready_provider(
-        &context,
-        CapacityMode::ExplicitCap,
-        Some(Sats(1_000)),
-        vec![SourceType::Gateway],
-    )
-    .await?;
+    for federation_id in ["cap-first", "cap-second"] {
+        let response = context
+            .request_liquidity(signed_request(test_request(
+                &provider_pubkey,
+                federation_id,
+                gateway_amounts(9_000),
+            )?)?)
+            .await?;
+        assert_eq!(accepted_gateway_amount(&response), Sats(9_000));
+    }
 
     assert_rejection(
         context
             .request_liquidity(signed_request(test_request(
                 &provider_pubkey,
-                "lowering-second",
-                gateway_amounts(500),
+                "cap-over",
+                gateway_amounts(10_001),
             )?)?)
             .await?,
         PublicRejectionCode::InsufficientCapacity,
     );
-    // Even an amount inside the new cap on its own is refused, because the
-    // outstanding reservation consumes all of it.
-    assert_eq!(allocation_count(&context.database).await?, 1);
+    assert_eq!(allocation_count(&context.database).await?, 2);
     Ok(())
 }
 
@@ -610,7 +593,7 @@ async fn gateway_allocation_funds_up_to_the_requested_maximum() -> anyhow::Resul
 }
 
 #[tokio::test]
-async fn gateway_allocation_is_limited_by_the_remaining_cap() -> anyhow::Result<()> {
+async fn gateway_allocation_is_limited_by_the_cap_per_allocation() -> anyhow::Result<()> {
     let context = test_context("fund-to-max-cap").await?;
     let provider_pubkey = setup_ready_provider(
         &context,
@@ -619,32 +602,35 @@ async fn gateway_allocation_is_limited_by_the_remaining_cap() -> anyhow::Result<
         vec![SourceType::Gateway],
     )
     .await?;
+    // Under the cap: the requester's maximum, each time.
+    for federation_id in ["cap-first", "cap-second"] {
+        let response = context
+            .request_liquidity(signed_request(test_request(
+                &provider_pubkey,
+                federation_id,
+                gateway_range(5_000, Some(20_000)),
+            )?)?)
+            .await?;
+        assert_eq!(accepted_gateway_amount(&response), Sats(20_000));
+    }
+
+    // A maximum above the cap is funded up to the cap.
     let response = context
         .request_liquidity(signed_request(test_request(
             &provider_pubkey,
-            "cap-first",
-            gateway_range(5_000, Some(20_000)),
+            "cap-third",
+            gateway_range(5_000, Some(50_000)),
         )?)?)
         .await?;
-    assert_eq!(accepted_gateway_amount(&response), Sats(20_000));
+    assert_eq!(accepted_gateway_amount(&response), Sats(30_000));
 
-    // Only 10 000 of the cap is left, which still covers the minimum.
-    let response = context
-        .request_liquidity(signed_request(test_request(
-            &provider_pubkey,
-            "cap-second",
-            gateway_range(5_000, Some(20_000)),
-        )?)?)
-        .await?;
-    assert_eq!(accepted_gateway_amount(&response), Sats(10_000));
-
-    // Nothing is left, so even the minimum is refused.
+    // A minimum above the cap is refused.
     assert_rejection(
         context
             .request_liquidity(signed_request(test_request(
                 &provider_pubkey,
-                "cap-third",
-                gateway_range(5_000, Some(20_000)),
+                "cap-fourth",
+                gateway_range(40_000, Some(50_000)),
             )?)?)
             .await?,
         PublicRejectionCode::InsufficientCapacity,

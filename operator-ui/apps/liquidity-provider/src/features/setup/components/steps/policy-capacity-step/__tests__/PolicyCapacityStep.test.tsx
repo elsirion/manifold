@@ -39,10 +39,10 @@ describe('PolicyCapacityStep', () => {
 
   it('should show a cap field only in explicit_cap mode', () => {
     render(<Harness />);
-    expect(screen.queryByLabelText('Cap amount (SATS)')).toBeNull();
+    expect(screen.queryByLabelText('Cap per allocation (SATS)')).toBeNull();
 
     fireEvent.change(screen.getByLabelText('Capacity mode'), { target: { value: 'explicit_cap' } });
-    expect(screen.getByLabelText('Cap amount (SATS)')).toBeTruthy();
+    expect(screen.getByLabelText('Cap per allocation (SATS)')).toBeTruthy();
   });
 });
 

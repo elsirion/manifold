@@ -100,10 +100,11 @@ export const PolicyCapacityStep = ({ draft, onChange, errors }: StepProps) => {
 
         {capacity.mode === 'explicit_cap' ? (
           <TextInput
-            label="Cap amount (SATS)"
+            label="Cap per allocation (SATS)"
             value={capValue}
             onChange={handleCap}
             placeholder="0"
+            hint="The most one federation is funded with, fee reserve excluded. It does not limit the total across federations."
             error={errors.explicit_cap}
           />
         ) : null}

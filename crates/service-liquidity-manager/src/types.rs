@@ -195,7 +195,7 @@ pub enum CapacityMode {
     #[strum(serialize = "available_funds")]
     AvailableFunds,
 
-    /// Use at most an operator-configured cap.
+    /// Commit at most an operator-configured cap per allocation.
     #[strum(serialize = "explicit_cap")]
     ExplicitCap,
 }
